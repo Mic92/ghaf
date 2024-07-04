@@ -12,6 +12,9 @@
       config = {
         allowUnfree = true;
       };
+      overlays = [
+       (import ../overlays/custom-packages)
+      ];
     };
     # make custom top-level lib available to all `perSystem` functions
     _module.args.lib = lib;
