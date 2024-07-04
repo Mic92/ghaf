@@ -1,4 +1,4 @@
-From 3f35f181a3b5245ac3a518bb8ae40bdf2b6635f3 Mon Sep 17 00:00:00 2001
+From 73e7c38ae83fd8f8bb36130d13782c3f8a1c01b1 Mon Sep 17 00:00:00 2001
 From: Yuri Nesterov <yuriy.nesterov@unikie.com>
 Date: Fri, 24 May 2024 11:15:41 +0200
 Subject: [PATCH] Add support for coloured window borders
@@ -6,33 +6,58 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
+This is usefor to visually distinguish between different windows when
+using waypipe. The border is drawn around the window and can be
+configured with a hex color and a border size in pixels.
+
 Signed-off-by: Jörg Thalheim <joerg@thalheim.io>
 ---
- protocols/function_list.txt |   3 +
- src/handlers.c              | 112 ++++++++++++++++++++++++++++++++++++
+ protocols/function_list.txt |   4 +
+ src/handlers.c              | 151 ++++++++++++++++++++++++++++++++++++
  src/main.h                  |   3 +
- src/parsing.h               |   4 ++
- src/util.c                  |  12 ++++
+ src/parsing.h               |   4 +
+ src/util.c                  |  12 +++
  src/util.h                  |   6 ++
- src/waypipe.c               |  69 +++++++++++++++++++++-
- 7 files changed, 207 insertions(+), 2 deletions(-)
+ src/waypipe.c               |  79 +++++++++++++++++--
+ waypipe.scd                 |   5 ++
+ 8 files changed, 257 insertions(+), 7 deletions(-)
 
 diff --git a/protocols/function_list.txt b/protocols/function_list.txt
-index 4acaec5..b15a293 100644
+index 4acaec5..4750263 100644
 --- a/protocols/function_list.txt
 +++ b/protocols/function_list.txt
-@@ -50,3 +50,6 @@ zwp_linux_dmabuf_v1_req_get_default_feedback
- zwp_linux_dmabuf_v1_req_get_surface_feedback
- zwp_primary_selection_offer_v1_req_receive
- zwp_primary_selection_source_v1_evt_send
-+xdg_wm_base_req_get_xdg_surface
-+xdg_surface_req_set_window_geometry
+@@ -16,6 +16,7 @@ wl_registry_req_bind
+ wl_shm_req_create_pool
+ wl_shm_pool_req_create_buffer
+ wl_shm_pool_req_resize
++wl_surface_evt_preferred_buffer_scale
+ wl_surface_req_attach
+ wl_surface_req_commit
+ wl_surface_req_damage
+@@ -25,7 +26,10 @@ wl_surface_req_set_buffer_scale
+ wp_presentation_evt_clock_id
+ wp_presentation_feedback_evt_presented
+ wp_presentation_req_feedback
 +xdg_surface_req_get_toplevel
++xdg_surface_req_set_window_geometry
+ xdg_toplevel_req_set_title
++xdg_wm_base_req_get_xdg_surface
+ zwlr_data_control_offer_v1_req_receive
+ zwlr_data_control_source_v1_evt_send
+ zwlr_export_dmabuf_frame_v1_evt_frame
 diff --git a/src/handlers.c b/src/handlers.c
-index 8e151b2..3bc15ff 100644
+index c82f4e0..89b4ce2 100644
 --- a/src/handlers.c
 +++ b/src/handlers.c
-@@ -357,6 +357,13 @@ struct wp_object *create_wp_object(uint32_t id, const struct wp_interface *type)
+@@ -98,6 +98,7 @@ struct obj_wl_surface {
+ 	uint32_t attached_buffer_id; /* protocol object id */
+ 	int32_t scale;
+ 	int32_t transform;
++	int32_t preferred_buffer_scale;
+ };
+ 
+ struct obj_wlr_screencopy_frame {
+@@ -357,6 +358,13 @@ struct wp_object *create_wp_object(uint32_t id, const struct wp_interface *type)
  	} else if (type == &intf_wl_surface) {
  		((struct obj_wl_surface *)new_obj)->scale = 1;
  	}
@@ -46,7 +71,7 @@ index 8e151b2..3bc15ff 100644
  	return new_obj;
  }
  
-@@ -742,6 +749,87 @@ static void rotate_damage_lists(struct obj_wl_surface *surface)
+@@ -743,6 +751,115 @@ static void rotate_damage_lists(struct obj_wl_surface *surface)
  			(SURFACE_DAMAGE_BACKLOG - 1) * sizeof(uint64_t));
  	surface->attached_buffer_uids[0] = 0;
  }
@@ -75,20 +100,23 @@ index 8e151b2..3bc15ff 100644
 +
 +void alpha_blend(struct color *pixel1, const struct color *pixel2)
 +{
-+	pixel1->r = (pixel2->a * pixel2->r + (255 - pixel2->a) * pixel1->r) / 255;
-+	pixel1->g = (pixel2->a * pixel2->g + (255 - pixel2->a) * pixel1->g) / 255;
-+	pixel1->b = (pixel2->a * pixel2->b + (255 - pixel2->a) * pixel1->b) / 255;
++	pixel1->r = (pixel2->a * pixel2->r + (255 - pixel2->a) * pixel1->r) /
++		    255;
++	pixel1->g = (pixel2->a * pixel2->g + (255 - pixel2->a) * pixel1->g) /
++		    255;
++	pixel1->b = (pixel2->a * pixel2->b + (255 - pixel2->a) * pixel1->b) /
++		    255;
 +	pixel1->a = pixel2->a + ((255 - pixel2->a) * pixel1->a) / 255;
 +}
 +
-+void draw_rect(struct obj_wl_buffer *buf, int x1, int y1, int x2, int y2, const struct color *c)
++void draw_rect(struct obj_wl_buffer *buf, int x1, int y1, int x2, int y2,
++		const struct color *c)
 +{
 +	for (int32_t x = x1; x < x2; x++) {
 +		for (int32_t y = y1; y < y2; y++) {
 +			if (c->a == 255) {
 +				set_pixel(buf, x, y, c);
-+			}
-+			else {
++			} else {
 +				struct color c1;
 +				get_pixel(buf, x, y, &c1);
 +				alpha_blend(&c1, c);
@@ -103,29 +131,54 @@ index 8e151b2..3bc15ff 100644
 +	struct obj_wl_surface *surface = (struct obj_wl_surface *)ctx->obj;
 +	if (!surface)
 +		return;
-+	struct wp_object *obj = tracker_get(ctx->tracker, surface->attached_buffer_id);
++	struct wp_object *obj =
++			tracker_get(ctx->tracker, surface->attached_buffer_id);
 +	if (!obj)
 +		return;
 +	struct obj_wl_buffer *buf = (struct obj_wl_buffer *)obj;
 +	if (!buf)
 +		return;
 +
-+	if ((buf->shm_format != WL_SHM_FORMAT_ARGB8888) && (buf->shm_format != WL_SHM_FORMAT_XRGB8888)) {
-+		wp_debug("Unable to draw the border, SHM format %d is not supported", buf->shm_format);
-+	}
-+	else {
++	if ((buf->shm_format != WL_SHM_FORMAT_ARGB8888) &&
++			(buf->shm_format != WL_SHM_FORMAT_XRGB8888)) {
++		wp_debug("Unable to draw the border, SHM format %d is not supported",
++				buf->shm_format);
++	} else {
 +		if (ctx->obj->xdg_surface_id) {
-+			struct wp_object *xdg_surface = tracker_get(ctx->tracker, ctx->obj->xdg_surface_id);
++			struct wp_object *xdg_surface = tracker_get(
++					ctx->tracker, ctx->obj->xdg_surface_id);
 +			if (xdg_surface && xdg_surface->is_window) {
-+				int32_t x1 = xdg_surface->window_x;
-+				int32_t y1 = xdg_surface->window_y;
-+				int32_t x2 = min(buf->shm_width, xdg_surface->window_x + xdg_surface->window_width);
-+				int32_t y2 = min(buf->shm_height, xdg_surface->window_y + xdg_surface->window_height);
-+				int32_t border_size = min(min(ctx->g->config->border_size, x2 - x1), y2 - y1);
-+				draw_rect(buf, x1, y1, x2, y1 + border_size, &ctx->g->config->border_color); // top
-+				draw_rect(buf, x1, y1 + border_size, x1 + border_size, y2, &ctx->g->config->border_color); // left
-+				draw_rect(buf, x1 + border_size, y2 - border_size, x2, y2, &ctx->g->config->border_color); // bottom
-+				draw_rect(buf, x2 - border_size, y1 + border_size, x2, y2 - border_size, &ctx->g->config->border_color); // right
++				int32_t scale = surface->preferred_buffer_scale >
++										0
++								? surface->preferred_buffer_scale
++								: 1;
++				int32_t x1 = xdg_surface->window_x * scale;
++				int32_t y1 = xdg_surface->window_y * scale;
++				int32_t x2 = min(buf->shm_width,
++						(xdg_surface->window_x +
++								xdg_surface->window_width) *
++								scale);
++				int32_t y2 = min(buf->shm_height,
++						(xdg_surface->window_y +
++								xdg_surface->window_height) *
++								scale);
++				int32_t border_size = min(
++						min(ctx->g->config->border_size,
++								x2 - x1),
++						y2 - y1);
++
++				draw_rect(buf, x1, y1, x2, y1 + border_size,
++						&ctx->g->config->border_color); // top
++				draw_rect(buf, x1, y1 + border_size,
++						x1 + border_size, y2,
++						&ctx->g->config->border_color); // left
++				draw_rect(buf, x1 + border_size,
++						y2 - border_size, x2, y2,
++						&ctx->g->config->border_color); // bottom
++				draw_rect(buf, x2 - border_size,
++						y1 + border_size, x2,
++						y2 - border_size,
++						&ctx->g->config->border_color); // right
 +			}
 +		}
 +	}
@@ -134,7 +187,7 @@ index 8e151b2..3bc15ff 100644
  void do_wl_surface_req_commit(struct context *ctx)
  {
  	struct obj_wl_surface *surface = (struct obj_wl_surface *)ctx->obj;
-@@ -759,6 +847,10 @@ void do_wl_surface_req_commit(struct context *ctx)
+@@ -760,6 +877,10 @@ void do_wl_surface_req_commit(struct context *ctx)
  		/* commit signifies a client-side update only */
  		return;
  	}
@@ -145,12 +198,28 @@ index 8e151b2..3bc15ff 100644
  	struct wp_object *obj =
  			tracker_get(ctx->tracker, surface->attached_buffer_id);
  	if (!obj) {
-@@ -2020,3 +2112,23 @@ void do_xdg_toplevel_req_set_title(struct context *ctx, const char *str)
+@@ -921,6 +1042,14 @@ static void append_damage_record(struct obj_wl_surface *surface, int32_t x,
+ 	damage->width = width;
+ 	damage->height = height;
+ }
++
++void do_wl_surface_evt_preferred_buffer_scale(
++		struct context *ctx, int32_t scale)
++{
++	struct obj_wl_surface *surface = (struct obj_wl_surface *)ctx->obj;
++	surface->preferred_buffer_scale = scale;
++}
++
+ void do_wl_surface_req_damage(struct context *ctx, int32_t x, int32_t y,
+ 		int32_t width, int32_t height)
+ {
+@@ -2021,3 +2150,25 @@ void do_xdg_toplevel_req_set_title(struct context *ctx, const char *str)
  }
  
  const struct wp_interface *the_display_interface = &intf_wl_display;
 +
-+void do_xdg_wm_base_req_get_xdg_surface(struct context *ctx, struct wp_object *id, struct wp_object *surface)
++void do_xdg_wm_base_req_get_xdg_surface(struct context *ctx,
++		struct wp_object *id, struct wp_object *surface)
 +{
 +	(void)ctx;
 +	surface->xdg_surface_id = id->obj_id;
@@ -162,7 +231,8 @@ index 8e151b2..3bc15ff 100644
 +	ctx->obj->is_window = true;
 +}
 +
-+void do_xdg_surface_req_set_window_geometry(struct context *ctx, int32_t x, int32_t y, int32_t width, int32_t height)
++void do_xdg_surface_req_set_window_geometry(struct context *ctx, int32_t x,
++		int32_t y, int32_t width, int32_t height)
 +{
 +	ctx->obj->window_x = x;
 +	ctx->obj->window_y = y;
@@ -199,10 +269,10 @@ index f3580b0..5739001 100644
  struct message_tracker {
  	/* Tree containing all objects that are currently alive or zombie */
 diff --git a/src/util.c b/src/util.c
-index 88948ee..6f0a5ca 100644
+index 8b4bce9..c4ff390 100644
 --- a/src/util.c
 +++ b/src/util.c
-@@ -800,3 +800,15 @@ int listen_on_vsock(uint32_t port, int nmaxclients, int *socket_fd_out)
+@@ -794,3 +794,15 @@ int listen_on_vsock(uint32_t port, int nmaxclients, int *socket_fd_out)
  	return 0;
  }
  #endif
@@ -234,7 +304,7 @@ index 9970840..8e5cec1 100644
 +
  #endif // WAYPIPE_UTIL_H
 diff --git a/src/waypipe.c b/src/waypipe.c
-index c66a971..a572ae8 100644
+index c66a971..4de11c2 100644
 --- a/src/waypipe.c
 +++ b/src/waypipe.c
 @@ -86,6 +86,7 @@ static const char usage_string[] =
@@ -307,19 +377,38 @@ index c66a971..a572ae8 100644
  
  static const struct option options[] = {
  		{"compress", required_argument, NULL, 'c'},
-@@ -473,7 +522,10 @@ static const struct option options[] = {
+@@ -473,22 +522,27 @@ static const struct option options[] = {
  		{"test-size", required_argument, NULL, ARG_BENCH_TEST_SIZE},
  		{"vsock", no_argument, NULL, ARG_VSOCK},
  		{"title-prefix", required_argument, NULL, ARG_TITLE_PREFIX},
--		{0, 0, NULL, 0}};
 +		{"border", required_argument, NULL, ARG_BORDER},
-+		{0, 0, NULL, 0}
-+};
+ 		{0, 0, NULL, 0}};
 +
  struct arg_permissions {
  	int val;
  	uint32_t mode_mask;
-@@ -498,7 +550,9 @@ static const struct arg_permissions arg_permissions[] = {
+ };
+ #define ALL_MODES (uint32_t) - 1
+ static const struct arg_permissions arg_permissions[] = {
+-		{'c', MODE_SSH | MODE_CLIENT | MODE_SERVER}, {'d', ALL_MODES},
+-		{'h', MODE_FAIL}, {'n', MODE_SSH | MODE_CLIENT | MODE_SERVER},
++		{'c', MODE_SSH | MODE_CLIENT | MODE_SERVER},
++		{'d', ALL_MODES},
++		{'h', MODE_FAIL},
++		{'n', MODE_SSH | MODE_CLIENT | MODE_SERVER},
+ 		{'o', MODE_SSH | MODE_CLIENT | MODE_SERVER},
+ 		{'s', MODE_SSH | MODE_CLIENT | MODE_SERVER},
+ 		{ARG_VERSION, MODE_FAIL},
+ 		{ARG_ALLOW_TILED, MODE_SSH | MODE_CLIENT | MODE_SERVER},
+ 		{ARG_UNLINK, MODE_SERVER},
+ 		{ARG_DRMNODE, MODE_SSH | MODE_CLIENT | MODE_SERVER},
+-		{ARG_REMOTENODE, MODE_SSH}, {ARG_WAYPIPE_BINARY, MODE_SSH},
++		{ARG_REMOTENODE, MODE_SSH},
++		{ARG_WAYPIPE_BINARY, MODE_SSH},
+ 		{ARG_LOGIN_SHELL, MODE_SERVER},
+ 		{ARG_VIDEO, MODE_SSH | MODE_CLIENT | MODE_SERVER},
+ 		{ARG_HWVIDEO, MODE_SSH | MODE_CLIENT | MODE_SERVER},
+@@ -498,7 +552,9 @@ static const struct arg_permissions arg_permissions[] = {
  		{ARG_CONTROL, MODE_SSH | MODE_SERVER},
  		{ARG_BENCH_TEST_SIZE, MODE_BENCH},
  		{ARG_VSOCK, MODE_SSH | MODE_CLIENT | MODE_SERVER},
@@ -330,31 +419,58 @@ index c66a971..a572ae8 100644
  
  /* envp is nonstandard, so use environ */
  extern char **environ;
-@@ -541,6 +595,11 @@ int main(int argc, char **argv)
+@@ -521,8 +577,7 @@ int main(int argc, char **argv)
+ 	char *socketpath = NULL;
+ 	uint32_t bench_test_size = (1u << 22) + 13;
+ 
+-	struct main_config config = {
+-			.n_worker_threads = 0,
++	struct main_config config = {.n_worker_threads = 0,
+ 			.drm_node = NULL,
+ #ifdef HAS_LZ4
+ 			.compression = COMP_LZ4,
+@@ -541,7 +596,9 @@ int main(int argc, char **argv)
  			.vsock_to_host = false, /* VMADDR_FLAG_TO_HOST */
  			.vsock_port = 0,
  			.title_prefix = NULL,
+-	};
 +			.border = false,
-+			.border_color = {
-+				.a = 255, .r = 0, .g = 0, .b = 0
-+			},
-+			.border_size = 3
- 	};
++			.border_color = {.a = 255, .r = 0, .g = 0, .b = 0},
++			.border_size = 3};
  
  	/* We do not parse any getopt arguments happening after the mode choice
-@@ -724,6 +783,12 @@ int main(int argc, char **argv)
+ 	 * string, so as not to interfere with them. */
+@@ -724,6 +781,14 @@ int main(int argc, char **argv)
  			}
  			config.title_prefix = optarg;
  			break;
 +		case ARG_BORDER:
 +			config.border = true;
 +			if (parse_border(optarg, &config) == -1) {
-+				fail = true;
++				fprintf(stderr, "Invalid border argument: %s\n",
++						optarg);
++				return EXIT_FAILURE;
 +			}
 +			break;
  		default:
  			fail = true;
  			break;
+diff --git a/waypipe.scd b/waypipe.scd
+index d0b300d..f555b30 100644
+--- a/waypipe.scd
++++ b/waypipe.scd
+@@ -111,6 +111,11 @@ compressible as images containing pictures.
+ 	absolute path, the socket will be created in the folder given by the
+ 	environment variable _XDG_RUNTIME_DIR_.)
+ 
++*--border C,S*
++	For server: add a border with hex color C and border size S in hex around the
++	window. The hex color should be in the format #RRGGBB or #RRGGBBAA and
++	the border size is in pixels.
++
+ *--drm-node R*
+ 	Specify the path *R* to the drm device that this instance of waypipe should
+ 	use and (in server mode) notify connecting applications about.
 -- 
-2.44.0
+2.45.1
 

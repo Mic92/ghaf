@@ -12,6 +12,7 @@
     inherit (pkgs) callPackage;
   in {
     packages = self.lib.platformPkgs system {
+      waypipe = pkgs.waypipe; # our waypipe has a patch in overlays/custom-packages/waypipe
       gala-app = callPackage ./gala {};
       kernel-hardening-checker = callPackage ./kernel-hardening-checker {};
       windows-launcher = callPackage ./windows-launcher {enableSpice = false;};
